@@ -1,0 +1,3 @@
+mqtt-firmware/config.h
+build/
+.pio/
