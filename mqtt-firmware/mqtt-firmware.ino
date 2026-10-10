@@ -13,7 +13,7 @@ WiFiClient network;
 PubSubClient mqtt(network);
 bool outputs[3]={false,false,false};
 bool stateDirty=true, wasOnline=false;
-bool debugWifiConnected=false, debugMqttConnected=false, debugTimeReady=false;
+bool loggedWifiConnected=false, loggedMqttConnected=false, loggedTimeReady=false;
 String lastCommandId[3];
 uint32_t lastWifi=0,lastMqtt=0,lastTelemetry=0,lastState=0,pumpStarted=0;
 String commandPrefix=String("smartphset/devices/")+DEVICE_ID+"/commands/";
@@ -56,7 +56,6 @@ void command(char* topic,byte* payload,unsigned int length) {
     if(length>384){Serial.println("Command rejected: payload too large");return;}
     String name(topic);if(!name.startsWith(commandPrefix))return;
     String actuator=name.substring(commandPrefix.length());
-    Serial.printf("MQTT command received: %s\n",actuator.c_str());
     int index=actuatorIndex(actuator.c_str());
     if(index<0){Serial.println("Command rejected: invalid actuator");return;}
     JsonDocument doc;
@@ -88,9 +87,9 @@ void setup() {
     WiFi.begin(WIFI_SSID,WIFI_PASSWORD);
     configTime(0,0,NTP_SERVER);
     Serial.println("Time/NTP: synchronization requested");
-    debugTimeReady=time(nullptr)>=1700000000;
-    Serial.println(debugTimeReady?"Time/NTP: READY":"Time/NTP: NOT READY");
-    if(debugTimeReady)Serial.printf("Time UTC: %s\n",capturedAt().c_str());
+    loggedTimeReady=time(nullptr)>=1700000000;
+    Serial.println(loggedTimeReady?"Time/NTP: READY":"Time/NTP: NOT READY");
+    if(loggedTimeReady)Serial.printf("Time UTC: %s\n",capturedAt().c_str());
     mqtt.setServer(MQTT_HOST,MQTT_PORT);mqtt.setCallback(command);
     mqtt.setBufferSize(1024);mqtt.setKeepAlive(15);mqtt.setSocketTimeout(1);
     lastWifi=millis();lastMqtt=millis()-5000;
@@ -103,21 +102,21 @@ void loop() {
     if(wasOnline && !online)allOff(); // Fail-safe on observed Wi-Fi/broker loss.
     wasOnline=online;
     bool wifiConnected=WiFi.status()==WL_CONNECTED;
-    if(wifiConnected!=debugWifiConnected) {
-        debugWifiConnected=wifiConnected;
+    if(wifiConnected!=loggedWifiConnected) {
+        loggedWifiConnected=wifiConnected;
         if(wifiConnected) {
             Serial.println("WiFi: connected");
             Serial.printf("WiFi: IP = %s\n",WiFi.localIP().toString().c_str());
             Serial.printf("WiFi: RSSI = %ld dBm\n",(long)WiFi.RSSI());
         } else Serial.println("WiFi: disconnected");
     }
-    if(debugMqttConnected && !online) {
-        debugMqttConnected=false;
+    if(loggedMqttConnected && !online) {
+        loggedMqttConnected=false;
         Serial.printf("MQTT: disconnected | state = %d\n",mqtt.state());
     }
     bool timeReady=time(nullptr)>=1700000000;
-    if(timeReady!=debugTimeReady) {
-        debugTimeReady=timeReady;
+    if(timeReady!=loggedTimeReady) {
+        loggedTimeReady=timeReady;
         Serial.println(timeReady?"Time/NTP: READY":"Time/NTP: NOT READY");
         if(timeReady)Serial.printf("Time UTC: %s\n",capturedAt().c_str());
     }
@@ -136,13 +135,13 @@ void loop() {
             bool connected=mqtt.connect(DEVICE_ID,MQTT_USERNAME,MQTT_PASSWORD);
             if(connected) {
                 Serial.println("MQTT: connected");
-                debugMqttConnected=true;
+                loggedMqttConnected=true;
                 allOff();
                 String subscription=commandPrefix+"+";
                 if(!mqtt.subscribe(subscription.c_str(),0)) {
                     Serial.printf("MQTT: subscription failed: %s\n",subscription.c_str());
                     mqtt.disconnect();
-                    debugMqttConnected=false;
+                    loggedMqttConnected=false;
                     Serial.printf("MQTT: disconnected | state = %d\n",mqtt.state());
                 } else Serial.printf("MQTT: subscribed to %s\n",subscription.c_str());
                 stateDirty=true;
@@ -155,19 +154,8 @@ void loop() {
     if(elapsed(now,lastTelemetry,5000)) {
         lastTelemetry=now;
         float humidity=dht.readHumidity(),temperature=dht.readTemperature();
-        int soilRaw=analogRead(SOIL_PIN);
-        float moisture=moisturePercent(soilRaw,SOIL_DRY_ADC,SOIL_WET_ADC);
+        float moisture=moisturePercent(analogRead(SOIL_PIN),SOIL_DRY_ADC,SOIL_WET_ADC);
         String timestamp=capturedAt();
-        Serial.println("------ SENSOR DEBUG ------");
-        if(std::isfinite(temperature))Serial.printf("Temperature: %.2f C\n",temperature);
-        else Serial.println("Temperature: INVALID");
-        if(std::isfinite(humidity))Serial.printf("Humidity: %.2f %%\n",humidity);
-        else Serial.println("Humidity: INVALID");
-        Serial.printf("Soil raw ADC (UNVERIFIED/FLOATING): %d\n",soilRaw);
-        if(std::isfinite(moisture))Serial.printf("Soil mapped (UNVERIFIED/FLOATING): %.2f %%\n",moisture);
-        else Serial.println("Soil mapped (UNVERIFIED/FLOATING): INVALID");
-        Serial.printf("Time ready: %s\n",timestamp.isEmpty()?"NO":"YES");
-        Serial.println("--------------------------");
         if(!std::isfinite(temperature)||!std::isfinite(humidity)||!std::isfinite(moisture)||timestamp.isEmpty()) {
             Serial.println("Telemetry skipped:");
             if(!std::isfinite(temperature))Serial.println(" - temperature invalid");

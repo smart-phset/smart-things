@@ -653,3 +653,33 @@ or Phase9 work performed for this checkpoint. Local diff checks passed.
 
 NEXT: preserve these completed software/DHT11 results; physical soil/actuator
 acceptance resumes only when hardware is available. Full Phase8 stays INCOMPLETE.
+
+## Physical MQTT relay control VERIFIED — 2026-10-10
+
+User-reported real hardware result: Swagger pump command sent successfully;
+Spring REST published the MQTT pump command; ESP32 received it and used GPIO27;
+the physical 5V relay switched successfully. Relay ON/OFF control VERIFIED:
+Swagger -> Spring REST -> MQTT -> ESP32 -> GPIO27 -> physical relay switching.
+This supersedes the earlier pending relay-control status only. Codex did not
+perform the physical test. Actual water pump/load operation is NOT VERIFIED.
+No physical pump timeout, startup/reset or disconnect safety acceptance is inferred.
+
+DEFERRED / UNVERIFIED: real soil sensor, soil ADC validation/calibration, real soil
+telemetry, physical fan, physical light, actual water pump/load operation and
+remaining actuator physical safety acceptance. Floating GPIO34 values remain
+INVALID as soil acceptance. Full Phase 8 remains INCOMPLETE; no Phase 9.
+
+Firmware logging cleanup: removed recurring five-second sensor debug dumps and
+redundant command-received messages. Retained concise Wi-Fi/MQTT connection/retry
+and subscription logs, time-readiness transitions, accepted actuator commands,
+GPIO assignments and meaningful rejection/telemetry errors. MQTT topics/payloads,
+device ID behavior, GPIO mappings, polarity, pump timeout, command validation,
+fail-safe behavior and telemetry/NTP validation are preserved. Private config.h
+remains ignored, unchanged and excluded from the commit; no credentials logged.
+
+Validation: host policy/unit tests PASS with C++17, -Wall -Wextra -Werror;
+arduino-cli compile for esp32:esp32:esp32 PASS using the /tmp build-path workaround
+(default cache read-only): 952757 bytes flash (72%), 48636 bytes RAM (14%).
+git diff --check PASS. HARDWARE_ACCEPTANCE.md records the same relay-only result.
+No upload performed. New commit/push authorized by the user; prior checkpoint
+commits will not be amended or rewritten. Other repositories remain untouched.

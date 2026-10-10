@@ -4,6 +4,16 @@ Status: SOFTWARE INTEGRATION VERIFIED; PHYSICAL HARDWARE ACCEPTANCE PENDING.
 Use the regular ESP32, not ESP32-CAM. Record observations below; software acceptance
 and GPIO-reported state do not prove physical load operation. Do not start Phase 9.
 
+## Latest relay checkpoint — 2026-10-10
+
+User-reported physical relay ON/OFF control VERIFIED:
+Swagger -> Spring REST -> MQTT -> ESP32 -> GPIO27 -> physical 5V relay switching.
+This supersedes the earlier relay-unavailable status below. Actual water pump/load
+operation remains UNVERIFIED. Real soil sensor, ADC/calibration and telemetry,
+physical fan/light and remaining actuator physical safety acceptance stay deferred.
+Floating GPIO34 values remain invalid as soil acceptance. No physical pump timeout,
+startup/reset or disconnect safety pass is inferred. Full Phase 8 remains INCOMPLETE.
+
 ## Current checkpoint — 2026-10-09
 
 User-reported ESP32 discovery, upload/boot and DHT11 real end-to-end path VERIFIED.
@@ -193,6 +203,7 @@ light and pump OFF and verify actual outputs plus fresh backend state.
 | Soil dry/wet response / calibration | DEFERRED / PENDING: hardware unavailable |
 | Fan actual ON/OFF / state | DEFERRED: actuator hardware unavailable |
 | Light actual ON/OFF / state | DEFERRED: actuator hardware unavailable |
+| GPIO27 physical 5V relay ON/OFF | VERIFIED: real Swagger -> REST -> MQTT -> ESP32 -> GPIO27 -> relay switching, user-reported 2026-10-10 |
 | Pump actual ON/OFF / state | DEFERRED: actuator hardware unavailable |
 | Pump measured auto-OFF time | DEFERRED: actuator hardware unavailable |
 | Reboot safety | DEFERRED: actuator hardware unavailable |
