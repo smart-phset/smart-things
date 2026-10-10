@@ -13,6 +13,7 @@ WiFiClient network;
 PubSubClient mqtt(network);
 bool outputs[3]={false,false,false};
 bool stateDirty=true, wasOnline=false;
+bool debugWifiConnected=false, debugMqttConnected=false, debugTimeReady=false;
 String lastCommandId[3];
 uint32_t lastWifi=0,lastMqtt=0,lastTelemetry=0,lastState=0,pumpStarted=0;
 String commandPrefix=String("smartphset/devices/")+DEVICE_ID+"/commands/";
@@ -22,7 +23,11 @@ String telemetryTopic=String("smartphset/devices/")+DEVICE_ID+"/telemetry";
 void setOutput(int index,bool on) {
     if(index==2 && on && !outputs[index])pumpStarted=millis();
     outputs[index]=on;
-    digitalWrite(OUTPUT_PINS[index],on==bool(ACTUATOR_ACTIVE_HIGH)?HIGH:LOW);
+    int level=on==bool(ACTUATOR_ACTIVE_HIGH)?HIGH:LOW;
+    digitalWrite(OUTPUT_PINS[index],level);
+    const char* names[]={"FAN","LIGHT","PUMP"};
+    Serial.printf("%s -> %s | GPIO%d -> %s\n",
+        names[index],on?"ON":"OFF",OUTPUT_PINS[index],level==HIGH?"HIGH":"LOW");
     stateDirty=true;
 }
 void allOff() {for(int i=0;i<3;i++)setOutput(i,false);}
@@ -48,18 +53,27 @@ void publishState() {
     if(mqtt.publish(stateTopic.c_str(),buffer,false))stateDirty=false;
 }
 void command(char* topic,byte* payload,unsigned int length) {
-    if(length>384)return;
+    if(length>384){Serial.println("Command rejected: payload too large");return;}
     String name(topic);if(!name.startsWith(commandPrefix))return;
-    int index=actuatorIndex(name.substring(commandPrefix.length()).c_str());
-    if(index<0)return;
+    String actuator=name.substring(commandPrefix.length());
+    Serial.printf("MQTT command received: %s\n",actuator.c_str());
+    int index=actuatorIndex(actuator.c_str());
+    if(index<0){Serial.println("Command rejected: invalid actuator");return;}
     JsonDocument doc;
-    if(deserializeJson(doc,payload,length) || !doc["on"].is<bool>()
-            || !doc["command_id"].is<const char*>() || !doc["expires_at"].is<int64_t>())return;
+    if(deserializeJson(doc,payload,length)){Serial.println("Command rejected: invalid JSON");return;}
+    if(!doc["on"].is<bool>()){Serial.println("Command rejected: invalid on field");return;}
+    if(!doc["command_id"].is<const char*>()){Serial.println("Command rejected: invalid command_id");return;}
+    if(!doc["expires_at"].is<int64_t>()){Serial.println("Command rejected: invalid expires_at");return;}
     const char* id=doc["command_id"];
-    if(strlen(id)==0 || strlen(id)>64 || !freshCommand(doc["expires_at"].as<int64_t>(),time(nullptr)))return;
-    if(lastCommandId[index]==id)return;
+    if(strlen(id)==0 || strlen(id)>64){Serial.println("Command rejected: invalid command_id");return;}
+    if(!freshCommand(doc["expires_at"].as<int64_t>(),time(nullptr))) {
+        Serial.println("Command rejected: expiry outside allowed window or device time invalid");return;
+    }
+    if(lastCommandId[index]==id){Serial.println("Command ignored: duplicate command_id");return;}
     lastCommandId[index]=id;
     // Exact ON/OFF assignment is idempotent; no toggle commands accepted.
+    const char* names[]={"FAN","LIGHT","PUMP"};
+    Serial.printf("Command accepted: %s -> %s\n",names[index],doc["on"].as<bool>()?"ON":"OFF");
     setOutput(index,doc["on"].as<bool>());
 }
 void setup() {
@@ -69,8 +83,14 @@ void setup() {
         pinMode(pin,OUTPUT);
     }
     allOff();dht.begin();analogReadResolution(12);
-    WiFi.mode(WIFI_STA);WiFi.begin(WIFI_SSID,WIFI_PASSWORD);
+    WiFi.mode(WIFI_STA);
+    Serial.printf("WiFi: connecting to %s...\n",WIFI_SSID);
+    WiFi.begin(WIFI_SSID,WIFI_PASSWORD);
     configTime(0,0,NTP_SERVER);
+    Serial.println("Time/NTP: synchronization requested");
+    debugTimeReady=time(nullptr)>=1700000000;
+    Serial.println(debugTimeReady?"Time/NTP: READY":"Time/NTP: NOT READY");
+    if(debugTimeReady)Serial.printf("Time UTC: %s\n",capturedAt().c_str());
     mqtt.setServer(MQTT_HOST,MQTT_PORT);mqtt.setCallback(command);
     mqtt.setBufferSize(1024);mqtt.setKeepAlive(15);mqtt.setSocketTimeout(1);
     lastWifi=millis();lastMqtt=millis()-5000;
@@ -82,19 +102,51 @@ void loop() {
     bool online=WiFi.status()==WL_CONNECTED && mqtt.connected();
     if(wasOnline && !online)allOff(); // Fail-safe on observed Wi-Fi/broker loss.
     wasOnline=online;
+    bool wifiConnected=WiFi.status()==WL_CONNECTED;
+    if(wifiConnected!=debugWifiConnected) {
+        debugWifiConnected=wifiConnected;
+        if(wifiConnected) {
+            Serial.println("WiFi: connected");
+            Serial.printf("WiFi: IP = %s\n",WiFi.localIP().toString().c_str());
+            Serial.printf("WiFi: RSSI = %ld dBm\n",(long)WiFi.RSSI());
+        } else Serial.println("WiFi: disconnected");
+    }
+    if(debugMqttConnected && !online) {
+        debugMqttConnected=false;
+        Serial.printf("MQTT: disconnected | state = %d\n",mqtt.state());
+    }
+    bool timeReady=time(nullptr)>=1700000000;
+    if(timeReady!=debugTimeReady) {
+        debugTimeReady=timeReady;
+        Serial.println(timeReady?"Time/NTP: READY":"Time/NTP: NOT READY");
+        if(timeReady)Serial.printf("Time UTC: %s\n",capturedAt().c_str());
+    }
     if(WiFi.status()!=WL_CONNECTED) {
-        if(elapsed(now,lastWifi,5000)){lastWifi=now;WiFi.reconnect();}
+        if(elapsed(now,lastWifi,5000)) {
+            lastWifi=now;
+            Serial.printf("WiFi: reconnecting to %s...\n",WIFI_SSID);
+            WiFi.reconnect();
+        }
         return;
     }
     if(!mqtt.connected()) {
         if(elapsed(now,lastMqtt,5000)) {
             lastMqtt=now;
+            Serial.printf("MQTT: connecting to %s:%u...\n",MQTT_HOST,(unsigned int)MQTT_PORT);
             bool connected=mqtt.connect(DEVICE_ID,MQTT_USERNAME,MQTT_PASSWORD);
             if(connected) {
+                Serial.println("MQTT: connected");
+                debugMqttConnected=true;
                 allOff();
-                if(!mqtt.subscribe((commandPrefix+"+").c_str(),0))mqtt.disconnect();
+                String subscription=commandPrefix+"+";
+                if(!mqtt.subscribe(subscription.c_str(),0)) {
+                    Serial.printf("MQTT: subscription failed: %s\n",subscription.c_str());
+                    mqtt.disconnect();
+                    debugMqttConnected=false;
+                    Serial.printf("MQTT: disconnected | state = %d\n",mqtt.state());
+                } else Serial.printf("MQTT: subscribed to %s\n",subscription.c_str());
                 stateDirty=true;
-            }
+            } else Serial.printf("MQTT: connection failed | state = %d\n",mqtt.state());
         }
         return;
     }
@@ -103,10 +155,26 @@ void loop() {
     if(elapsed(now,lastTelemetry,5000)) {
         lastTelemetry=now;
         float humidity=dht.readHumidity(),temperature=dht.readTemperature();
-        float moisture=moisturePercent(analogRead(SOIL_PIN),SOIL_DRY_ADC,SOIL_WET_ADC);
+        int soilRaw=analogRead(SOIL_PIN);
+        float moisture=moisturePercent(soilRaw,SOIL_DRY_ADC,SOIL_WET_ADC);
         String timestamp=capturedAt();
+        Serial.println("------ SENSOR DEBUG ------");
+        if(std::isfinite(temperature))Serial.printf("Temperature: %.2f C\n",temperature);
+        else Serial.println("Temperature: INVALID");
+        if(std::isfinite(humidity))Serial.printf("Humidity: %.2f %%\n",humidity);
+        else Serial.println("Humidity: INVALID");
+        Serial.printf("Soil raw ADC (UNVERIFIED/FLOATING): %d\n",soilRaw);
+        if(std::isfinite(moisture))Serial.printf("Soil mapped (UNVERIFIED/FLOATING): %.2f %%\n",moisture);
+        else Serial.println("Soil mapped (UNVERIFIED/FLOATING): INVALID");
+        Serial.printf("Time ready: %s\n",timestamp.isEmpty()?"NO":"YES");
+        Serial.println("--------------------------");
         if(!std::isfinite(temperature)||!std::isfinite(humidity)||!std::isfinite(moisture)||timestamp.isEmpty()) {
-            Serial.println("Sensor/time unavailable; telemetry skipped");return;
+            Serial.println("Telemetry skipped:");
+            if(!std::isfinite(temperature))Serial.println(" - temperature invalid");
+            if(!std::isfinite(humidity))Serial.println(" - humidity invalid");
+            if(!std::isfinite(moisture))Serial.println(" - soil mapped value invalid");
+            if(timestamp.isEmpty())Serial.println(" - time not synchronized");
+            return;
         }
         JsonDocument doc;doc["device_id"]=DEVICE_ID;doc["captured_at"]=timestamp;
         doc["temperature_c"]=temperature;doc["humidity_percent"]=humidity;doc["soil_moisture_percent"]=moisture;
