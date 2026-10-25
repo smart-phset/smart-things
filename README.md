@@ -1,130 +1,292 @@
-# SmartPhset regular ESP32 firmware
+# SmartPhset regular ESP32
 
-Dedicated project: `smart-phset/smart-things`. This checkout was initialized as a
-Git repository for Phase 8; remote existence/delivery is not yet verified.
+Firmware and onboarding for the regular ESP32 grow-room MQTT controller.
+ESP32-CAM source and its Linux/Windows guide live exclusively in the dedicated
+[smart-phset/web-cam repository](https://github.com/smart-phset/web-cam).
 
-The original root `smart-things.ino` is preserved unchanged (serial-only sensor
-and actuator prototype). The separate **mqtt-firmware/** sketch implements Phase8.
-Do not compile both sketches as one Arduino sketch. ESP32-CAM is another project.
+## Role in SmartPhset
 
-## Pins and physical wiring
+Regular ESP32 ↔ Wi-Fi/Mosquitto ↔ [Spring](https://github.com/smart-phset/phset-api)
+↔ PostgreSQL ↔ [Next.js](https://github.com/smart-phset/phset-client/tree/feat/grow-room-monitoring).
+[ESP32-CAM](https://github.com/smart-phset/web-cam) → raw MJPEG → [Python AI](https://github.com/smart-phset/phset-ai/tree/feat/live-camera)
+→ annotated video and detection metadata. The camera does not run YOLO or use MQTT.
+See the frontend [complete startup order](https://github.com/smart-phset/phset-client/blob/feat/grow-room-monitoring/README.md#start-smartphset-from-a-fresh-computerreboot).
 
-Classic ESP32 DevKit: DHT11 GPIO4, soil ADC GPIO34 (ADC1), fan GPIO25, light GPIO26,
-pump GPIO27. Use drivers/relays/MOSFETs and external supply sized for the loads,
-common ground and inductive protection as appropriate. Do not power loads directly
-from GPIO. Soil ADC signal must not exceed ESP32 input voltage limits. Verify relay
-active-high/active-low polarity **without loads** before connecting equipment.
+```text
+mqtt-firmware/                 regular ESP32 MQTT sketch
+tests/policy_test.cpp          host-side controller policy tests
+smart-things.ino               preserved original serial-only prototype
+```
 
-## Build setup
+Compile `mqtt-firmware`, not the repository root. The root sketch is the preserved
+serial-only prototype. Do not copy camera source into this repository; clone
+[web-cam](https://github.com/smart-phset/web-cam) separately for camera work.
 
-Official releases checked 2026-10-08: ESP32 Arduino core3.3.12, PubSubClient2.8,
-Adafruit DHT1.4.7, ArduinoJson7.4.3. These are new-sketch build candidates;
-no full ESP32 compilation is claimed until the toolchain is available.
+## Requirements
+
+Linux: Git, Arduino CLI, USB serial access (distribution-specific device group/udev
+permissions), and a C++17 compiler for host tests. Windows: Git for Windows,
+PowerShell, Arduino CLI on PATH and the USB-UART driver's correct COM port. For
+host tests install a C++17 compiler such as MSVC Build Tools and use Developer
+PowerShell, or g++ on PATH. No WSL is required. Backend Mosquitto needs Docker
+Engine on Linux or running Docker Desktop on Windows.
+
+Inspected toolchain: Arduino CLI **1.5.1**, Espressif `esp32:esp32` **3.3.12**,
+DHT sensor library **1.4.7**, Adafruit Unified Sensor **1.1.15**, PubSubClient **2.8**,
+ArduinoJson **7.4.3**. Use the Espressif core, not the separately installed
+`arduino:esp32` core.
+
+Regular board: ESP32 DevKit, DHT11, appropriate relay/MOSFET drivers and load power.
+
+## Clone
+
+```text
+git clone https://github.com/smart-phset/smart-things.git
+cd smart-things
+git switch main
+```
+
+## Configuration
+
+Copy safe examples once, edit privately, and recompile/reflash after changes:
+
+| File | Purpose | Secret? / commit? |
+|---|---|---|
+| mqtt-firmware/config.example.h | Safe controller template | No secrets; commit |
+| mqtt-firmware/config.h | Actual controller/network settings | Contains secrets; never commit |
+
+### Regular ESP32 pins and values
+
+| Hardware | GPIO |
+|---|---|
+| DHT11 data | 4 |
+| Soil ADC input | 34 |
+| Fan driver | 25 |
+| Light driver | 26 |
+| Pump driver | 27 |
+
+**The current development setup has no real soil sensor installed. Floating GPIO34
+readings are not valid soil moisture**, even if firmware emits a number. Do not
+use them for calibration, automation decisions or acceptance.
+
+| config.h define | Purpose / example | Secret? |
+|---|---|---|
+| WIFI_SSID | Your network, `YOUR_WIFI_NAME` | Private network information |
+| WIFI_PASSWORD | `YOUR_WIFI_PASSWORD` | Yes |
+| MQTT_HOST | Mosquitto computer LAN IPv4, `YOUR_LAPTOP_IP` | No |
+| MQTT_PORT | `1883` | No |
+| MQTT_USERNAME / MQTT_PASSWORD | Empty for current anonymous broker | Password yes |
+| DEVICE_ID | Unique board ID, `grow-room-1`; also in Spring MQTT_DEVICES | No |
+| NTP_SERVER | `pool.ntp.org`; clock sync required | No |
+| SOIL_DRY_ADC / SOIL_WET_ADC | Template 3500 / 1500; unverified examples, measure actual sensor | No |
+| ACTUATOR_ACTIVE_HIGH | `1` active-high or `0` active-low; verify with loads disconnected | No |
+| MAX_PUMP_ON_MS | `10000UL`, approximately 10-second pump limit | No |
+
+Use drivers and external supply sized for loads, common ground and inductive
+protection. Never power a load directly from GPIO. Verify voltage and relay
+polarity with loads disconnected. GPIO-reported state is not physical feedback.
+
+### Find your laptop IP — essential MQTT rule
+
+**MQTT_HOST must be the IP address of the computer running Mosquitto.**
+`localhost` on an ESP32 means the ESP32, not your laptop. Linux:
+
+```bash
+ip route
+ip -br addr
+```
+
+Windows PowerShell:
+
+```powershell
+ipconfig
+```
+
+Choose the IPv4 of the Wi-Fi/Ethernet adapter connected to the same reachable
+network as the ESP32, not a Docker, VPN, virtual or disconnected adapter.
+For example only, if your laptop IPv4 is **192.168.1.25**, use:
+
+```cpp
+#define MQTT_HOST "192.168.1.25"
+```
+
+Replace that example with your own IP. DHCP/network changes can require editing
+config.h and uploading again. Boards and laptop must be able to reach each other;
+guest Wi-Fi/client isolation can block them even with similar addresses.
+
+On Windows, allow inbound **TCP 1883** for Mosquitto/Docker on the trusted private
+network if blocked. Windows Defender Firewall → Advanced settings → Inbound Rules
+→ New Rule → Port → TCP 1883 → allow on Private profile; scope to your local
+network. Do not disable the firewall. Spring and firmware MQTT credentials must
+match broker settings if you later enable broker authentication.
+
+### Separate ESP32-CAM setup
+
+Use the [web-cam README](https://github.com/smart-phset/web-cam/blob/main/README.md)
+for AI-Thinker/OV2640 hardware, private Wi-Fi config, PSRAM build, GPIO0 flashing,
+COM/tty ports, flash PWM, stream URLs and AI integration. Its commands run from the
+separate `web-cam` clone. The camera gets its own DHCP address and does not use
+MQTT_HOST; Python connects to `http://<ESP32_CAM_IP>:81/stream`.
+
+## Linux setup
+
+One-time core/library setup (same Arduino CLI commands also work in PowerShell):
 
 ```bash
 arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 arduino-cli core install esp32:esp32@3.3.12 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-arduino-cli lib install 'DHT sensor library@1.4.7' 'PubSubClient@2.8' 'ArduinoJson@7.4.3'
+arduino-cli lib install "DHT sensor library@1.4.7" "Adafruit Unified Sensor@1.1.15" "PubSubClient@2.8" "ArduinoJson@7.4.3"
 cp mqtt-firmware/config.example.h mqtt-firmware/config.h
-# Edit ignored config.h privately; choose your board's correct relay polarity.
-arduino-cli compile --fqbn esp32:esp32:esp32 mqtt-firmware
-# Upload only after checking wiring and disconnecting/isolating unsafe loads.
-arduino-cli upload --fqbn esp32:esp32:esp32 --port <serial-port> mqtt-firmware
 ```
 
-`config.h` is ignored. Never commit Wi-Fi/MQTT credentials. Use broker LAN address,
-not localhost on the board. Give every board its own DEVICE_ID (ASCII letters,
-digits, hyphen/underscore, max64), and add it to backend MQTT_DEVICES. Defaults
-are examples, not validated calibration: measure dry/wet ADC in your substrate
-and set SOIL_DRY_ADC / SOIL_WET_ADC. Equal endpoints invalidate telemetry.
-ACTUATOR_ACTIVE_HIGH must match your actual driver; startup code sets OFF before
-configuring pins as outputs. GPIO boot/reset behavior still requires board testing.
+Edit the private mqtt-firmware/config.h before compiling; do not overwrite existing config.h files.
+Discover ports with `arduino-cli board list`. Examples below are **not guaranteed**
+to be your ports. Close any serial monitor before uploading.
 
-## MQTT contract
+```bash
+arduino-cli board list
+arduino-cli compile --fqbn esp32:esp32:esp32:UploadSpeed=115200 mqtt-firmware
+arduino-cli upload --fqbn esp32:esp32:esp32:UploadSpeed=115200 --port /dev/ttyUSB0 mqtt-firmware
+arduino-cli monitor --port /dev/ttyUSB0 --config baudrate=115200
+```
 
-- `smartphset/devices/{DEVICE_ID}/telemetry`: JSON device_id, temperature_c,
-  humidity_percent, soil_moisture_percent, captured_at (UTC ISO8601 microseconds).
-- `smartphset/devices/{DEVICE_ID}/state`: JSON device_id, fan/light/pump booleans,
-  captured_at. These are commanded GPIO state, not independently sensed load feedback.
-- `smartphset/devices/{DEVICE_ID}/commands`:
-  `{"cmd":"P0","command_id":"uuid","expires_at":1791460810}`.
-  expires_at is integer Unix epoch seconds, not ISO text.
+## Windows setup
 
-Publishes non-retained QoS0; command subscription QoS0. Backend publishes
-non-retained, expiring commands without offline queueing. NTP sync is required:
-invalid time skips telemetry/state and rejects actuation. Sensor failures skip
-telemetry instead of publishing fake readings. Firmware still reports valid outputs
-independently from DHT success. Publishes sensor/output state every5s and dirty
-output state promptly. MQTT buffer1024, socket timeout1s, reconnect attempts at
-5s intervals. Wi-Fi/broker loss observed by loop turns outputs OFF, successful
-reconnect starts OFF and subscribes again. No old state is restored on reboot.
+Install Arduino CLI and the USB-UART driver for your board/adapter, then open a new
+PowerShell so PATH is refreshed. One time:
 
-Commands require the exact commands topic, a code from P1/P0/F1/F0/L1/L0,
-a nonempty command ID (max64 characters) and fresh expiry
-(at most15 seconds in future). Most recent command ID per actuator is ignored on
-replay; ON is assignment, never toggle. Repeated ON while already on does not reset
-the pump deadline. Pump defaults to auto-OFF after10s; network/DHT operations can
-delay the cooperative loop, so this is not a hard realtime safety interlock.
-No MQTT/TLS credential security is claimed for the existing anonymous LAN broker.
+```powershell
+arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+arduino-cli core install esp32:esp32@3.3.12 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+arduino-cli lib install "DHT sensor library@1.4.7" "Adafruit Unified Sensor@1.1.15" "PubSubClient@2.8" "ArduinoJson@7.4.3"
+Copy-Item mqtt-firmware/config.example.h mqtt-firmware/config.h
+notepad mqtt-firmware/config.h
+arduino-cli board list
+```
 
-## Safe tests
+Use the discovered **COM port**, not /dev/ttyUSB*. COM3 below is an example;
+compare before/after plugging each board in or check Device Manager → Ports.
+The board may show unknown while its serial port is still usable with explicit FQBN.
+
+```powershell
+arduino-cli compile --fqbn "esp32:esp32:esp32:UploadSpeed=115200" mqtt-firmware
+arduino-cli upload --fqbn "esp32:esp32:esp32:UploadSpeed=115200" --port COM3 mqtt-firmware
+arduino-cli monitor --port COM3 --config baudrate=115200
+```
+
+## Running
+
+Flash only when firmware/network configuration changes. Each session, start Docker
+and Mosquitto/Spring, then power the regular ESP32. The firmware connects Wi-Fi,
+MQTT and NTP, publishes approximately every 5 seconds and reports connection status
+on serial. DEVICE_ID must be in Spring's MQTT_DEVICES allowlist.
+
+### MQTT contract and pump safety
+
+| Topic | Purpose |
+|---|---|
+| smartphset/devices/{DEVICE_ID}/telemetry | Sensor JSON with device_id and captured_at UTC |
+| smartphset/devices/{DEVICE_ID}/state | Reported fan/light/pump booleans and captured_at |
+| smartphset/devices/{DEVICE_ID}/commands | Expiring command JSON |
+
+Command shape: `{"cmd":"P0","command_id":"unique-id","expires_at":<future-unix-seconds>}`.
+The expiry must be fresh and at most 15 seconds ahead; use Spring/Swagger to
+create actual commands. P1/P0 = pump ON/OFF; F1/F0 = fan ON/OFF; L1/L0 = light
+ON/OFF. Bare strings and legacy topic/boolean commands are rejected. Most recent
+command ID per actuator is deduplicated. Commands/state are non-retained; firmware
+uses QoS0 and does not restore old outputs on restart.
+
+Pump auto-off is approximately **10 seconds**, with repeated ON not extending the
+deadline. This is a cooperative loop, not a hardware safety interlock. Observed
+Wi-Fi/MQTT loss and reconnect force outputs OFF. NTP must be synchronized; invalid
+time rejects commands and suppresses timestamped telemetry/state. DHT failure
+skips telemetry but does not prevent independently reported output state.
+
+## Testing
+
+Linux host policy tests:
 
 ```bash
 c++ -std=c++17 -Wall -Wextra -Werror tests/policy_test.cpp -o /tmp/smart-things-policy-test
 /tmp/smart-things-policy-test
+git diff --check
 ```
 
-Host test covers moisture mapping policy (not real sensor calibration), all six
-command codes/invalid codes, ID validation/duplicate suppression, command expiry,
-unsynced time, pump timer start/no-reset policy and millis rollover. It does NOT compile Wi-Fi/DHT/
-PubSubClient/ArduinoJson APIs and does NOT prove electrical/physical behavior.
+Windows Developer PowerShell with MSVC:
 
-Backend docs: sibling `api/docs/iot-integration.md`; normal-terminal software
-acceptance script is `api/tools/verify_mqtt_integration.py` (synthetic test device,
-fan OFF only). No real board acceptance yet.
-
-Manual board checks: boot OFF; DHT/soil reasonable; NTP; telemetry/database state;
-each output ON/OFF through a suitable driver; pump auto-OFF; malformed/expired
-commands ignored; Wi-Fi loss/broker loss/recovery; reboot OFF; finish with all loads
-OFF. Hardware acceptance remains **PENDING** until exact observations are recorded.
-
-## Command protocol migration — pending physical acceptance
-
-Update Spring and this firmware together. Commands now use one exact topic and
-`cmd`: P1/P0 = pump ON/OFF, F1/F0 = fan ON/OFF, L1/L0 = light ON/OFF.
-Legacy command topics/boolean MQTT payloads are rejected. The public REST request
-and receipt, reported state, GPIO25/26/27, configured polarity and approximately
-10-second pump timeout are preserved. No frontend changes are required.
-
-Compile/upload from a normal terminal (existing private config.h retained):
-
-```bash
-cd /home/ratanak/smart-phset/smart-things
-arduino-cli compile --fqbn esp32:esp32:esp32 --build-path /tmp/smartphset-command-codes-build mqtt-firmware
-arduino-cli upload --fqbn esp32:esp32:esp32 --port /dev/ttyUSB0 --input-dir /tmp/smartphset-command-codes-build mqtt-firmware
-arduino-cli monitor --port /dev/ttyUSB0 --config baudrate=115200
+```powershell
+New-Item -ItemType Directory -Force build | Out-Null
+cl /nologo /std:c++17 /EHsc /W4 /WX tests/policy_test.cpp /Fe:build/policy-test.exe /Fo:build/policy-test.obj
+.\build\policy-test.exe
+git diff --check
 ```
 
-Observe the actual command and returned state (existing local anonymous broker):
+Or PowerShell with g++ on PATH:
 
-```bash
-mosquitto_sub -h localhost -p 1883 -v \
-  -t 'smartphset/devices/grow-room-1/commands' \
-  -t 'smartphset/devices/grow-room-1/state'
+```powershell
+New-Item -ItemType Directory -Force build | Out-Null
+g++ -std=c++17 -Wall -Wextra -Werror tests/policy_test.cpp -o build/policy-test.exe
+.\build\policy-test.exe
 ```
 
-Restart Spring with its existing private IoT key/MQTT/database environment, then
-upload and monitor the regular ESP32. Confirm subscription to the exact commands
-topic. Through the existing frontend or Swagger, send pump ON once: observe P1,
-HTTP202, accepted/GPIO diagnostics, pump=true and relay ON. Wait without repeating
-ON: around10s observe GPIO OFF, pump=false, relay OFF and frontend OFF on its next
-poll. Test pump OFF (P0) and fan/light ON/OFF code/state mappings. Fan/light physical
-operation is still deferred. Verify rejection of invalid/expired commands and
-repeat an identical captured command ID within its validity window to see duplicate
-rejection. Finish all outputs OFF. Fresh subscriber should see no retained command.
+Also run the regular ESP32 compile command for your platform above; host tests
+alone do not compile Arduino APIs. Camera compilation is documented and validated
+separately in [web-cam](https://github.com/smart-phset/web-cam).
 
-This new protocol is NOT physically verified. Historical GPIO27/5V relay switching
-verification remains valid for the prior protocol. Actual water pump/load, physical
-fan/light and real soil sensor/calibration/telemetry remain unverified. Floating
-GPIO34 readings must not be accepted as soil measurements. No firmware upload or
-physical actuation was performed by the coding agent.
+Observe real MQTT from either shell without installing a host MQTT client:
+
+```text
+docker exec smartphset-mosquitto mosquitto_sub -h localhost -p 1883 -v -t smartphset/devices/grow-room-1/state -t smartphset/devices/grow-room-1/telemetry -t smartphset/devices/grow-room-1/commands
+```
+
+Stop subscription with Ctrl+C. Verify fresh timestamps and Spring GET
+`/api/iot/devices/grow-room-1/state` using X-SmartPhset-IoT-Key (commands in API README).
+With safe isolated loads, verify boot OFF, each command mapping, pump auto-off, disconnect/reboot OFF
+and invalid/expired-command rejection. Finish all outputs OFF. Compiling is not
+physical acceptance; see [hardware acceptance history](HARDWARE_ACCEPTANCE.md).
+Real soil, fan/light and actual pump/load operation remain unverified.
+
+## Common problems
+
+- Wi-Fi works but MQTT does not: stale MQTT_HOST after moving networks is a known
+  failure. Recheck laptop IPv4, Docker/Mosquitto, TCP1883 firewall and client isolation.
+- No telemetry: inspect DHT wiring and NTP reachability. Floating soil readings
+  are invalid even when numeric. Backend must allow the exact DEVICE_ID.
+- Serial port unavailable: use board list, a data-capable cable, correct driver,
+  Linux serial permissions, and close other monitors. Windows uses COMx.
+- Upload hangs connecting: the regular ESP32 may need BOOT held/reset. Close
+  serial monitors and use the detected port and 115200 upload speed.
+- Brownouts or repeated resets: check power, USB cable and wiring. For camera
+  flash-chip/stream/PSRAM issues, use the separate
+  [camera troubleshooting guide](https://github.com/smart-phset/web-cam/blob/main/README.md#troubleshooting).
+- GPIO ON reported but load does not run: reported GPIO state is not sensed load
+  feedback. Check driver/polarity/supply safely; never bridge loads directly to GPIO.
+
+## Git workflow
+
+Start with a clean worktree (`git status`). Update the branch named in Clone before
+creating your own feature branch. These commands work in Bash and PowerShell:
+
+```text
+git pull --ff-only
+git switch -c feat/my-change
+# Edit and run the checks above.
+git status
+git add README.md
+# Add other intended files explicitly; never add private configuration.
+git diff --cached
+git commit -m "Describe the change"
+git push -u origin feat/my-change
+```
+
+Open a Pull Request against the team's agreed integration branch. Do not push
+teammate changes directly to main. Never use `git push --force` unless the team
+explicitly agrees and understands why. If pull refuses, inspect local changes and
+coordinate; do not discard work with a hard reset.
+
+## Security notes
+
+Never commit `.env`, `.env.local`, private `config.h`, Wi-Fi passwords, API keys,
+DB passwords or auth secrets. Commit only safe example files. Inspect
+`git diff --cached` before each commit; do not force-add ignored files. If a secret
+was committed, rotate it and coordinate cleanup; deleting it does not revoke it.

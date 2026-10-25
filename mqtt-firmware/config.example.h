@@ -1,8 +1,8 @@
 #pragma once
 // Copy to config.h locally; never commit Wi-Fi/MQTT credentials.
-#define WIFI_SSID "<wifi-ssid>"
-#define WIFI_PASSWORD "<wifi-password>"
-#define MQTT_HOST "<broker-lan-ip>"
+#define WIFI_SSID "YOUR_WIFI_NAME"
+#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+#define MQTT_HOST "YOUR_LAPTOP_IP"
 #define MQTT_PORT 1883
 #define MQTT_USERNAME ""
 #define MQTT_PASSWORD ""

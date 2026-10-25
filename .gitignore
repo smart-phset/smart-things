@@ -1,3 +1,9 @@
 mqtt-firmware/config.h
 build/
 .pio/
+
+# Private local configuration
+.env
+.env.*
+!.env.example
+**/config.h
