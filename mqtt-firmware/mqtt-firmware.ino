@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <DHT.h>
 #include <sys/time.h>
+#include <esp_system.h>
 #include "config.h"
 #include "policy.h"
 
@@ -14,14 +15,14 @@ PubSubClient mqtt(network);
 bool outputs[3]={false,false,false};
 bool stateDirty=true, wasOnline=false;
 bool loggedWifiConnected=false, loggedMqttConnected=false, loggedTimeReady=false;
-String lastCommandId[3];
+char lastCommandId[3][65]={};
 uint32_t lastWifi=0,lastMqtt=0,lastTelemetry=0,lastState=0,pumpStarted=0;
-String commandPrefix=String("smartphset/devices/")+DEVICE_ID+"/commands/";
+String commandTopic=String("smartphset/devices/")+DEVICE_ID+"/commands";
 String stateTopic=String("smartphset/devices/")+DEVICE_ID+"/state";
 String telemetryTopic=String("smartphset/devices/")+DEVICE_ID+"/telemetry";
 
 void setOutput(int index,bool on) {
-    if(index==2 && on && !outputs[index])pumpStarted=millis();
+    if(startsPumpTimer(index,on,outputs[index]))pumpStarted=millis();
     outputs[index]=on;
     int level=on==bool(ACTUATOR_ACTIVE_HIGH)?HIGH:LOW;
     digitalWrite(OUTPUT_PINS[index],level);
@@ -54,29 +55,50 @@ void publishState() {
 }
 void command(char* topic,byte* payload,unsigned int length) {
     if(length>384){Serial.println("Command rejected: payload too large");return;}
-    String name(topic);if(!name.startsWith(commandPrefix))return;
-    String actuator=name.substring(commandPrefix.length());
-    int index=actuatorIndex(actuator.c_str());
-    if(index<0){Serial.println("Command rejected: invalid actuator");return;}
+    if(commandTopic!=topic)return;
     JsonDocument doc;
     if(deserializeJson(doc,payload,length)){Serial.println("Command rejected: invalid JSON");return;}
-    if(!doc["on"].is<bool>()){Serial.println("Command rejected: invalid on field");return;}
+    if(!doc["cmd"].is<const char*>() || doc["cmd"].as<JsonString>().size()!=2) {
+        Serial.println("Command rejected: invalid cmd");return;
+    }
+    const char* code=doc["cmd"];
+    int index=commandIndex(code);
+    if(index<0){Serial.println("Command rejected: invalid cmd");return;}
+    bool on=code[1]=='1';
+    Serial.printf("MQTT command received: %s\n",code);
     if(!doc["command_id"].is<const char*>()){Serial.println("Command rejected: invalid command_id");return;}
     if(!doc["expires_at"].is<int64_t>()){Serial.println("Command rejected: invalid expires_at");return;}
     const char* id=doc["command_id"];
-    if(strlen(id)==0 || strlen(id)>64){Serial.println("Command rejected: invalid command_id");return;}
+    if(!validCommandId(id) || doc["command_id"].as<JsonString>().size()!=strlen(id)){Serial.println("Command rejected: invalid command_id");return;}
     if(!freshCommand(doc["expires_at"].as<int64_t>(),time(nullptr))) {
         Serial.println("Command rejected: expiry outside allowed window or device time invalid");return;
     }
-    if(lastCommandId[index]==id){Serial.println("Command ignored: duplicate command_id");return;}
-    lastCommandId[index]=id;
+    if(!rememberCommandId(id,lastCommandId[index])){Serial.println("Command ignored: duplicate command_id");return;}
     // Exact ON/OFF assignment is idempotent; no toggle commands accepted.
     const char* names[]={"FAN","LIGHT","PUMP"};
-    Serial.printf("Command accepted: %s -> %s\n",names[index],doc["on"].as<bool>()?"ON":"OFF");
-    setOutput(index,doc["on"].as<bool>());
+    Serial.printf("Command accepted: %s -> %s\n",names[index],on?"ON":"OFF");
+    setOutput(index,on);
+}
+const char* resetReasonName(esp_reset_reason_t reason) {
+    switch(reason) {
+        case ESP_RST_POWERON:return "POWERON";
+        case ESP_RST_EXT:return "EXT";
+        case ESP_RST_SW:return "SW";
+        case ESP_RST_PANIC:return "PANIC";
+        case ESP_RST_INT_WDT:return "INT_WDT";
+        case ESP_RST_TASK_WDT:return "TASK_WDT";
+        case ESP_RST_WDT:return "WDT";
+        case ESP_RST_DEEPSLEEP:return "DEEPSLEEP";
+        case ESP_RST_BROWNOUT:return "BROWNOUT";
+        case ESP_RST_SDIO:return "SDIO";
+        default:return "UNKNOWN";
+    }
 }
 void setup() {
     Serial.begin(115200);
+    delay(200);
+    esp_reset_reason_t resetReason=esp_reset_reason();
+    Serial.printf("Boot: reset_reason=%d (%s)\n",static_cast<int>(resetReason),resetReasonName(resetReason));
     for(int pin:OUTPUT_PINS) {
         digitalWrite(pin,ACTUATOR_ACTIVE_HIGH?LOW:HIGH);
         pinMode(pin,OUTPUT);
@@ -89,7 +111,6 @@ void setup() {
     Serial.println("Time/NTP: synchronization requested");
     loggedTimeReady=time(nullptr)>=1700000000;
     Serial.println(loggedTimeReady?"Time/NTP: READY":"Time/NTP: NOT READY");
-    if(loggedTimeReady)Serial.printf("Time UTC: %s\n",capturedAt().c_str());
     mqtt.setServer(MQTT_HOST,MQTT_PORT);mqtt.setCallback(command);
     mqtt.setBufferSize(1024);mqtt.setKeepAlive(15);mqtt.setSocketTimeout(1);
     lastWifi=millis();lastMqtt=millis()-5000;
@@ -118,7 +139,6 @@ void loop() {
     if(timeReady!=loggedTimeReady) {
         loggedTimeReady=timeReady;
         Serial.println(timeReady?"Time/NTP: READY":"Time/NTP: NOT READY");
-        if(timeReady)Serial.printf("Time UTC: %s\n",capturedAt().c_str());
     }
     if(WiFi.status()!=WL_CONNECTED) {
         if(elapsed(now,lastWifi,5000)) {
@@ -137,7 +157,7 @@ void loop() {
                 Serial.println("MQTT: connected");
                 loggedMqttConnected=true;
                 allOff();
-                String subscription=commandPrefix+"+";
+                const String& subscription=commandTopic;
                 if(!mqtt.subscribe(subscription.c_str(),0)) {
                     Serial.printf("MQTT: subscription failed: %s\n",subscription.c_str());
                     mqtt.disconnect();

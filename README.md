@@ -46,8 +46,8 @@ configuring pins as outputs. GPIO boot/reset behavior still requires board testi
   humidity_percent, soil_moisture_percent, captured_at (UTC ISO8601 microseconds).
 - `smartphset/devices/{DEVICE_ID}/state`: JSON device_id, fan/light/pump booleans,
   captured_at. These are commanded GPIO state, not independently sensed load feedback.
-- `smartphset/devices/{DEVICE_ID}/commands/{fan|light|pump}`:
-  `{"command_id":"uuid","on":false,"expires_at":1791460810}`.
+- `smartphset/devices/{DEVICE_ID}/commands`:
+  `{"cmd":"P0","command_id":"uuid","expires_at":1791460810}`.
   expires_at is integer Unix epoch seconds, not ISO text.
 
 Publishes non-retained QoS0; command subscription QoS0. Backend publishes
@@ -59,7 +59,8 @@ output state promptly. MQTT buffer1024, socket timeout1s, reconnect attempts at
 5s intervals. Wi-Fi/broker loss observed by loop turns outputs OFF, successful
 reconnect starts OFF and subscribes again. No old state is restored on reboot.
 
-Commands require known topic actuator, actual boolean, command ID and fresh expiry
+Commands require the exact commands topic, a code from P1/P0/F1/F0/L1/L0,
+a nonempty command ID (max64 characters) and fresh expiry
 (at most15 seconds in future). Most recent command ID per actuator is ignored on
 replay; ON is assignment, never toggle. Repeated ON while already on does not reset
 the pump deadline. Pump defaults to auto-OFF after10s; network/DHT operations can
@@ -73,8 +74,9 @@ c++ -std=c++17 -Wall -Wextra -Werror tests/policy_test.cpp -o /tmp/smart-things-
 /tmp/smart-things-policy-test
 ```
 
-Host test covers moisture calibration/clamps/invalid endpoints, actuator mapping,
-command expiry/unsynced time and millis rollover. It does NOT compile Wi-Fi/DHT/
+Host test covers moisture mapping policy (not real sensor calibration), all six
+command codes/invalid codes, ID validation/duplicate suppression, command expiry,
+unsynced time, pump timer start/no-reset policy and millis rollover. It does NOT compile Wi-Fi/DHT/
 PubSubClient/ArduinoJson APIs and does NOT prove electrical/physical behavior.
 
 Backend docs: sibling `api/docs/iot-integration.md`; normal-terminal software
@@ -85,3 +87,44 @@ Manual board checks: boot OFF; DHT/soil reasonable; NTP; telemetry/database stat
 each output ON/OFF through a suitable driver; pump auto-OFF; malformed/expired
 commands ignored; Wi-Fi loss/broker loss/recovery; reboot OFF; finish with all loads
 OFF. Hardware acceptance remains **PENDING** until exact observations are recorded.
+
+## Command protocol migration — pending physical acceptance
+
+Update Spring and this firmware together. Commands now use one exact topic and
+`cmd`: P1/P0 = pump ON/OFF, F1/F0 = fan ON/OFF, L1/L0 = light ON/OFF.
+Legacy command topics/boolean MQTT payloads are rejected. The public REST request
+and receipt, reported state, GPIO25/26/27, configured polarity and approximately
+10-second pump timeout are preserved. No frontend changes are required.
+
+Compile/upload from a normal terminal (existing private config.h retained):
+
+```bash
+cd /home/ratanak/smart-phset/smart-things
+arduino-cli compile --fqbn esp32:esp32:esp32 --build-path /tmp/smartphset-command-codes-build mqtt-firmware
+arduino-cli upload --fqbn esp32:esp32:esp32 --port /dev/ttyUSB0 --input-dir /tmp/smartphset-command-codes-build mqtt-firmware
+arduino-cli monitor --port /dev/ttyUSB0 --config baudrate=115200
+```
+
+Observe the actual command and returned state (existing local anonymous broker):
+
+```bash
+mosquitto_sub -h localhost -p 1883 -v \
+  -t 'smartphset/devices/grow-room-1/commands' \
+  -t 'smartphset/devices/grow-room-1/state'
+```
+
+Restart Spring with its existing private IoT key/MQTT/database environment, then
+upload and monitor the regular ESP32. Confirm subscription to the exact commands
+topic. Through the existing frontend or Swagger, send pump ON once: observe P1,
+HTTP202, accepted/GPIO diagnostics, pump=true and relay ON. Wait without repeating
+ON: around10s observe GPIO OFF, pump=false, relay OFF and frontend OFF on its next
+poll. Test pump OFF (P0) and fan/light ON/OFF code/state mappings. Fan/light physical
+operation is still deferred. Verify rejection of invalid/expired commands and
+repeat an identical captured command ID within its validity window to see duplicate
+rejection. Finish all outputs OFF. Fresh subscriber should see no retained command.
+
+This new protocol is NOT physically verified. Historical GPIO27/5V relay switching
+verification remains valid for the prior protocol. Actual water pump/load, physical
+fan/light and real soil sensor/calibration/telemetry remain unverified. Floating
+GPIO34 readings must not be accepted as soil measurements. No firmware upload or
+physical actuation was performed by the coding agent.

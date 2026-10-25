@@ -683,3 +683,36 @@ arduino-cli compile for esp32:esp32:esp32 PASS using the /tmp build-path workaro
 git diff --check PASS. HARDWARE_ACCEPTANCE.md records the same relay-only result.
 No upload performed. New commit/push authorized by the user; prior checkpoint
 commits will not be amended or rewritten. Other repositories remain untouched.
+
+## Explicit command codes / single MQTT topic — 2026-10-24
+
+User authorized paired Spring/firmware protocol change; no commit/push/upload.
+Started clean at main bbf860d, paired backend main f66e05d. Existing frontend and
+AI work preserved. Read current logs and code before changes.
+
+Subscribe exactly smartphset/devices/{DEVICE_ID}/commands on initial connect and
+reconnect. Parse only P1/P0/F1/F0/L1/L0 in JSON cmd; old actuator suffix and MQTT on
+field removed. command_id stays nonempty/max64, now also rejects embedded NUL;
+expires_at stays integer with synchronized-time/current..+15s checks. Preserve
+most-recent-ID-per-actuator replay rejection (not an unlimited replay history).
+Fixed-size ID storage exposes the same duplicate policy to host tests. No toggles.
+Received-code/accepted/GPIO logs are concise and contain no credentials.
+
+GPIO25/26/27, configured polarity, startup/disconnect/reconnect OFF, state JSON,
+DHT telemetry and 5s reporting remain unchanged. Extracted existing pump timer
+start predicate for tests; repeated ON while already ON cannot reset its timer.
+MAX_PUMP_ON_MS stays configured as before (example10000); auto-OFF loop preserved.
+No private config read/modified. Floating GPIO34 is not valid soil telemetry.
+
+Validation: C++17 -Wall -Wextra -Werror host policy tests PASS: six codes, invalid
+codes, ID validation/duplicates, expired/future/unsynced time, pump timer start and
+no-reset, 10s expiry predicate and millis rollover. arduino-cli compile for
+esp32:esp32:esp32 using /tmp/smartphset-command-codes-build PASS: 952105 bytes flash
+(72%), 48780 bytes RAM (14%). These checks do not prove physical relay behavior.
+Backend Gradle checks blocked before tasks by sandbox wildcard-IP restriction;
+supplemental focused JUnit tests passed. git diff --check PASS in both repositories.
+
+README documents paired deployment, exact upload/monitor/subscriber commands and
+manual acceptance. NEW PROTOCOL NOT PHYSICALLY VERIFIED. Prior GPIO27/5V relay
+verification remains historical. Actual water pump/load, physical fan/light and
+real soil hardware/calibration/telemetry remain unverified. Await user relay test.
