@@ -1,20 +1,24 @@
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <DHT.h>
 #include <sys/time.h>
 #include <esp_system.h>
 #include "config.h"
+#include "mqtt_ca.h"
 #include "policy.h"
 
 constexpr int DHT_PIN=4, SOIL_PIN=34;
 constexpr int OUTPUT_PINS[]={25,26,27}; // fan, light, pump
 DHT dht(DHT_PIN,DHT11);
-WiFiClient network;
+WiFiClientSecure network;
 PubSubClient mqtt(network);
 bool outputs[3]={false,false,false};
 bool stateDirty=true, wasOnline=false;
 bool loggedWifiConnected=false, loggedMqttConnected=false, loggedTimeReady=false;
+bool ntpRequested=false;
+uint32_t lastNtp=0;
 char lastCommandId[3][65]={};
 uint32_t lastWifi=0,lastMqtt=0,lastTelemetry=0,lastState=0,pumpStarted=0;
 String commandTopic=String("smartphset/devices/")+DEVICE_ID+"/commands";
@@ -42,16 +46,18 @@ String capturedAt() {
 }
 void publishJson(const String& topic,JsonDocument& doc) {
     char buffer[768];size_t size=measureJson(doc);
-    if(size>=sizeof(buffer))return;
+    if(size>=sizeof(buffer)){Serial.println("Telemetry skipped: JSON buffer too small");return;}
     serializeJson(doc,buffer,sizeof(buffer));
-    if(!mqtt.publish(topic.c_str(),buffer,false))Serial.println("MQTT publish failed");
+    Serial.printf("Telemetry publish %s: %s\n",mqtt.publish(topic.c_str(),buffer,false)?"OK":"FAILED",topic.c_str());
 }
 void publishState() {
     String timestamp=capturedAt();if(timestamp.isEmpty())return;
     JsonDocument doc;doc["device_id"]=DEVICE_ID;doc["captured_at"]=timestamp;
     doc["fan"]=outputs[0];doc["light"]=outputs[1];doc["pump"]=outputs[2];
     char buffer[512];serializeJson(doc,buffer,sizeof(buffer));
-    if(mqtt.publish(stateTopic.c_str(),buffer,false))stateDirty=false;
+    bool sent=mqtt.publish(stateTopic.c_str(),buffer,false);
+    if(sent)stateDirty=false;
+    Serial.printf("Device-state publish %s: %s\n",sent?"OK":"FAILED",stateTopic.c_str());
 }
 void command(char* topic,byte* payload,unsigned int length) {
     if(length>384){Serial.println("Command rejected: payload too large");return;}
@@ -107,10 +113,12 @@ void setup() {
     WiFi.mode(WIFI_STA);
     Serial.printf("WiFi: connecting to %s...\n",WIFI_SSID);
     WiFi.begin(WIFI_SSID,WIFI_PASSWORD);
-    configTime(0,0,NTP_SERVER);
-    Serial.println("Time/NTP: synchronization requested");
     loggedTimeReady=time(nullptr)>=1700000000;
     Serial.println(loggedTimeReady?"Time/NTP: READY":"Time/NTP: NOT READY");
+    // Hostname passed to connect enables SNI and certificate hostname validation.
+    network.setCACert(MQTT_ROOT_CA);
+    network.setConnectionTimeout(1000); // TCP/read/write timeout in milliseconds (core 3.3.12).
+    network.setHandshakeTimeout(5); // Seconds; reconnect is attempted only with outputs OFF.
     mqtt.setServer(MQTT_HOST,MQTT_PORT);mqtt.setCallback(command);
     mqtt.setBufferSize(1024);mqtt.setKeepAlive(15);mqtt.setSocketTimeout(1);
     lastWifi=millis();lastMqtt=millis()-5000;
@@ -126,10 +134,15 @@ void loop() {
     if(wifiConnected!=loggedWifiConnected) {
         loggedWifiConnected=wifiConnected;
         if(wifiConnected) {
+            ntpRequested=false; // Request NTP only after Wi-Fi (including reconnection).
             Serial.println("WiFi: connected");
             Serial.printf("WiFi: IP = %s\n",WiFi.localIP().toString().c_str());
             Serial.printf("WiFi: RSSI = %ld dBm\n",(long)WiFi.RSSI());
-        } else Serial.println("WiFi: disconnected");
+        } else {
+            ntpRequested=false;
+            network.stop();
+            Serial.println("WiFi: disconnected");
+        }
     }
     if(loggedMqttConnected && !online) {
         loggedMqttConnected=false;
@@ -148,13 +161,32 @@ void loop() {
         }
         return;
     }
+    // No waiting loop: pump deadline/fail-safe checks still run on every pass.
+    if(!ntpRequested || (!timeReady && elapsed(now,lastNtp,30000))) {
+        if(ntpRequested)Serial.println("Time/NTP: sync failed after 30s; retrying (check DNS/UDP 123)");
+        configTime(0,0,NTP_SERVER);
+        ntpRequested=true;lastNtp=now;
+        Serial.printf("Time/NTP: synchronization requested from %s\n",NTP_SERVER);
+    }
+    if(!timeReady) {
+        if(outputs[0] || outputs[1] || outputs[2])allOff();
+        if(mqtt.connected())mqtt.disconnect();
+        network.stop();
+        return; // Never attempt TLS with an invalid clock.
+    }
     if(!mqtt.connected()) {
         if(elapsed(now,lastMqtt,5000)) {
-            lastMqtt=now;
-            Serial.printf("MQTT: connecting to %s:%u...\n",MQTT_HOST,(unsigned int)MQTT_PORT);
+            if(outputs[0] || outputs[1] || outputs[2])allOff();
+            if(strlen(MQTT_PASSWORD)==0 || strcmp(MQTT_PASSWORD,"YOUR_MQTT_PASSWORD")==0) {
+                lastMqtt=now;
+                Serial.println("MQTT: configure MQTT_PASSWORD in private config.h; TLS connection deferred");
+                return;
+            }
+            Serial.printf("MQTT TLS: connecting/reconnecting to %s:%u (CA + hostname verification)...\n",MQTT_HOST,(unsigned int)MQTT_PORT);
             bool connected=mqtt.connect(DEVICE_ID,MQTT_USERNAME,MQTT_PASSWORD);
+            lastMqtt=millis(); // Back off after the bounded connection attempt completes.
             if(connected) {
-                Serial.println("MQTT: connected");
+                Serial.println("MQTT TLS: connected and authenticated");
                 loggedMqttConnected=true;
                 allOff();
                 const String& subscription=commandTopic;
@@ -163,9 +195,15 @@ void loop() {
                     mqtt.disconnect();
                     loggedMqttConnected=false;
                     Serial.printf("MQTT: disconnected | state = %d\n",mqtt.state());
-                } else Serial.printf("MQTT: subscribed to %s\n",subscription.c_str());
+                } else Serial.printf("MQTT: subscription sent successfully: %s (QoS0; SUBACK not exposed by PubSubClient)\n",subscription.c_str());
                 stateDirty=true;
-            } else Serial.printf("MQTT: connection failed | state = %d\n",mqtt.state());
+            } else {
+                Serial.printf("MQTT: connection failed | state = %d\n",mqtt.state());
+                if(mqtt.state()==MQTT_CONNECT_BAD_CREDENTIALS || mqtt.state()==MQTT_CONNECT_UNAUTHORIZED)
+                    Serial.println("MQTT: authentication/authorization rejected; check broker username/password and ACL");
+                char error[160]={};int code=network.lastError(error,sizeof(error));
+                if(code)Serial.printf("TLS: error %d: %s\n",code,error);
+            }
         }
         return;
     }

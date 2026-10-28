@@ -2,10 +2,10 @@
 // Copy to config.h locally; never commit Wi-Fi/MQTT credentials.
 #define WIFI_SSID "YOUR_WIFI_NAME"
 #define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
-#define MQTT_HOST "YOUR_LAPTOP_IP"
-#define MQTT_PORT 1883
-#define MQTT_USERNAME ""
-#define MQTT_PASSWORD ""
+#define MQTT_HOST "mqtt.ratanak.me"
+#define MQTT_PORT 8883
+#define MQTT_USERNAME "smartphset-esp32"
+#define MQTT_PASSWORD "YOUR_MQTT_PASSWORD"
 #define DEVICE_ID "grow-room-1"
 #define NTP_SERVER "pool.ntp.org"
 // Measure your sensor in dry substrate and fully wet substrate before use.
